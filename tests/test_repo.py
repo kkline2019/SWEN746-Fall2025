@@ -4,9 +4,10 @@ import os
 import pandas as pd
 import pytest
 from github import Github
+from tabulate import tabulate
 import vcr
 from datetime import datetime, timedelta
-from src.repo_miner import fetch_commits
+from src.repo_miner import fetch_commits, fetch_issues
 
 # --- Dummy GitHub API objects for unit tests ---
 
@@ -21,6 +22,19 @@ class DummyCommitCommit:
         self.author = author
         self.message = message
 
+class DummyIssue:
+    def __init__(self, state, **kwargs):
+        self.id = kwargs["id"]
+        self.number = ["number"]
+        self.title = kwargs["title"]
+        self.user = kwargs["user"]
+        self.state = state
+        self.created_at = kwargs["created"]
+        if state == "closed" or state == "all":
+            self.closed_at = kwargs["closed"]
+        self.comments = kwargs["comments"]
+
+
 class DummyCommit:
     def __init__(self, sha, author, email, date, message):
         self.sha = sha
@@ -33,6 +47,14 @@ class DummyRepo:
 
     def get_commits(self):
         return self._commits
+
+
+class DummyRepoIssue:
+    def __init__(self, issues):
+        self._issues = issues
+
+    def get_issues(self, state="open"):
+        return self._issues
 
 class DummyGithub:
     def __init__(self, token):
@@ -63,6 +85,55 @@ def test_fetch_commits_basic():
     assert list(df.columns) == ["sha", "author", "email", "date", "message"]
     assert len(df) == 2
     assert df.iloc[0]["message"] == "Initial commit"
+
+#Basic test for issues outputting the data and showing that PRs are excluded.
+def test_fetch_issues_basic():
+    issues = [
+        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
+        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
+    ]
+    gh_instance._repo = DummyRepoIssue(issues)
+    df = fetch_issues("octocat/Hello-World", "open", 50)
+
+    print(tabulate(df, headers='keys', tablefmt='grid'))
+
+#An issue test that shows the dates and being parsed correctly.
+def test_fetch_issues_dates():
+    issues = [
+        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
+        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
+    ]
+    gh_instance._repo = DummyRepoIssue(issues)
+    df = fetch_issues("octocat/Hello-World", "open", 50)
+
+    print()
+    print("Closed Issue:")
+    print("Created at: " + df.iloc[0, 5])
+    print("Closed at: " + df.iloc[0, 6])
+
+    print()
+    print("Open Issue:")
+    print("Created at: " + df.iloc[1, 5])
+    print("Closed at: " + str(df.iloc[1, 6]))
+
+#An issue that shows how long the issue was open for if the issue was closed. 
+#Or how long the issue has been open for currently if the issue is still open
+def test_fetch_issues_duration():
+    issues = [
+        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
+        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
+    ]
+    gh_instance._repo = DummyRepoIssue(issues)
+    df = fetch_issues("octocat/Hello-World", "open", 50)
+
+    print()
+    print("Closed Issue:")
+    print("Duration: " + str(df.iloc[0, 7]))
+
+    print()
+    print("Open Issue:")
+    print("Duration: " + str(df.iloc[1, 7]))
+
 
 def test_fetch_commits_limit():
     now = datetime.now()
