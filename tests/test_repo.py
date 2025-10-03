@@ -97,6 +97,8 @@ def test_fetch_issues_basic():
 
     print(tabulate(df, headers='keys', tablefmt='grid'))
 
+    assert len(df) == 2
+
 #An issue test that shows the dates and being parsed correctly.
 def test_fetch_issues_dates():
     issues = [
@@ -116,6 +118,11 @@ def test_fetch_issues_dates():
     print("Created at: " + df.iloc[1, 5])
     print("Closed at: " + str(df.iloc[1, 6]))
 
+    assert len(df) == 2
+    assert df.iloc[0,5] == "2023-10-01T12:00:00"
+    assert df.iloc[0,6] == "2023-10-05T15:30:00"
+    assert df.iloc[1,6] == None
+
 #An issue that shows how long the issue was open for if the issue was closed. 
 #Or how long the issue has been open for currently if the issue is still open
 def test_fetch_issues_duration():
@@ -133,6 +140,9 @@ def test_fetch_issues_duration():
     print()
     print("Open Issue:")
     print("Duration: " + str(df.iloc[1, 7]))
+
+    assert len(df) == 2
+    assert df.iloc[0, 7] == 4
 
 
 def test_fetch_commits_limit():

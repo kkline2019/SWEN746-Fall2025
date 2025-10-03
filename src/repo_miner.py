@@ -73,7 +73,8 @@ def fetch_issues(repo_full_name: str, state: str="all", max_issues: int=None) ->
             closed_at = issue.closed_at.isoformat()
         else:
             closed_at = None
-            duration_days = datetime.now(timezone.utc) - issue.created_at
+            created = datetime.fromisoformat(str(issue.created_at)).replace(tzinfo=timezone.utc)
+            duration_days = datetime.now(timezone.utc) - created
         
         record = {
             "id" : issue.id,
