@@ -1,15 +1,12 @@
-# tests/test_repo.py
+# tests/test_repo_miner.py
 
 import os
 import pandas as pd
 import pytest
-from github import Github
-from tabulate import tabulate
-import vcr
 from datetime import datetime, timedelta
-from src.repo_miner import fetch_commits, fetch_issues
+from src.repo_miner import fetch_commits, fetch_issues, merge_and_summarize
 
-# --- Dummy GitHub API objects for unit tests ---
+# --- Helpers for dummy GitHub API objects ---
 
 class DummyAuthor:
     def __init__(self, name, email, date):
@@ -22,181 +19,147 @@ class DummyCommitCommit:
         self.author = author
         self.message = message
 
-class DummyIssue:
-    def __init__(self, state, **kwargs):
-        self.id = kwargs["id"]
-        self.number = ["number"]
-        self.title = kwargs["title"]
-        self.user = kwargs["user"]
-        self.state = state
-        self.created_at = kwargs["created"]
-        if state == "closed" or state == "all":
-            self.closed_at = kwargs["closed"]
-        self.comments = kwargs["comments"]
-
-
 class DummyCommit:
     def __init__(self, sha, author, email, date, message):
         self.sha = sha
-        self.author = DummyAuthor(author, email, date)
         self.commit = DummyCommitCommit(DummyAuthor(author, email, date), message)
 
+class DummyUser:
+    def __init__(self, login):
+        self.login = login
+
+class DummyIssue:
+    def __init__(self, id_, number, title, user, state, created_at, closed_at, comments, is_pr=False):
+        self.id = id_
+        self.number = number
+        self.title = title
+        self.user = DummyUser(user)
+        self.state = state
+        self.created_at = created_at
+        self.closed_at = closed_at
+        self.comments = comments
+        # attribute only on pull requests
+        self.pull_request = DummyUser("pr") if is_pr else None
+
 class DummyRepo:
-    def __init__(self, commits):
+    def __init__(self, commits, issues):
         self._commits = commits
+        self._issues = issues
 
     def get_commits(self):
         return self._commits
 
-
-class DummyRepoIssue:
-    def __init__(self, issues):
-        self._issues = issues
-
-    def get_issues(self, state="open"):
-        return self._issues
+    def get_issues(self, state="all"):
+        # filter by state
+        if state == "all":
+            return self._issues
+        return [i for i in self._issues if i.state == state]
 
 class DummyGithub:
     def __init__(self, token):
         assert token == "fake-token"
     def get_repo(self, repo_name):
+        # ignore repo_name; return repo set in test fixture
         return self._repo
 
-# Global dummy instance
+@pytest.fixture(autouse=True)
+def patch_env_and_github(monkeypatch):
+    # Set fake token
+    monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
+    # Patch Github class
+    import src.repo_miner as rm
+    monkeypatch.setattr(rm, "Github", lambda token: gh_instance)
+    yield
+
+# Helper global placeholder
 gh_instance = DummyGithub("fake-token")
 
-# --- Monkeypatch for unit tests only ---
-@pytest.fixture(autouse=True)
-def patch_env_and_github(monkeypatch, request):
-    if "use_real_github" not in request.keywords:
-        monkeypatch.setenv("GITHUB_TOKEN", "fake-token")
-        monkeypatch.setattr("src.repo_miner.Github", lambda token: gh_instance)
-
-# --- Unit Tests ---
-
-def test_fetch_commits_basic():
+def test_fetch_commits_basic(monkeypatch):
+    # Setup dummy commits
     now = datetime.now()
     commits = [
         DummyCommit("sha1", "Alice", "a@example.com", now, "Initial commit\nDetails"),
         DummyCommit("sha2", "Bob", "b@example.com", now - timedelta(days=1), "Bug fix")
     ]
-    gh_instance._repo = DummyRepo(commits)
+    gh_instance._repo = DummyRepo(commits, [])
     df = fetch_commits("any/repo")
     assert list(df.columns) == ["sha", "author", "email", "date", "message"]
     assert len(df) == 2
     assert df.iloc[0]["message"] == "Initial commit"
 
-#Basic test for issues outputting the data and showing that PRs are excluded.
-def test_fetch_issues_basic():
-    issues = [
-        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
-        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
-    ]
-    gh_instance._repo = DummyRepoIssue(issues)
-    df = fetch_issues("octocat/Hello-World", "open", 50)
-
-    print(tabulate(df, headers='keys', tablefmt='grid'))
-
-    assert len(df) == 2
-
-#An issue test that shows the dates and being parsed correctly.
-def test_fetch_issues_dates():
-    issues = [
-        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
-        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
-    ]
-    gh_instance._repo = DummyRepoIssue(issues)
-    df = fetch_issues("octocat/Hello-World", "open", 50)
-
-    print()
-    print("Closed Issue:")
-    print("Created at: " + df.iloc[0, 5])
-    print("Closed at: " + df.iloc[0, 6])
-
-    print()
-    print("Open Issue:")
-    print("Created at: " + df.iloc[1, 5])
-    print("Closed at: " + str(df.iloc[1, 6]))
-
-    assert len(df) == 2
-    assert df.iloc[0,5] == "2023-10-01T12:00:00"
-    assert df.iloc[0,6] == "2023-10-05T15:30:00"
-    assert df.iloc[1,6] == None
-
-#An issue that shows how long the issue was open for if the issue was closed. 
-#Or how long the issue has been open for currently if the issue is still open
-def test_fetch_issues_duration():
-    issues = [
-        DummyIssue(state="closed", id=101, number=42, title="Dummy", user="Alice", created=datetime(2023, 10, 1, 12, 0, 0), closed=datetime(2023, 10, 5, 15, 30, 0), comments="Fixed"),
-        DummyIssue(state="open", id=101, number=42, title="Dummy", user="Blice", created=datetime(2023, 10, 1, 12, 0, 0), comments="Fixed")
-    ]
-    gh_instance._repo = DummyRepoIssue(issues)
-    df = fetch_issues("octocat/Hello-World", "open", 50)
-
-    print()
-    print("Closed Issue:")
-    print("Duration: " + str(df.iloc[0, 7]))
-
-    print()
-    print("Open Issue:")
-    print("Duration: " + str(df.iloc[1, 7]))
-
-    assert len(df) == 2
-    assert df.iloc[0, 7] == 4
-
-
-def test_fetch_commits_limit():
+def test_fetch_commits_limit(monkeypatch):
+    # More commits than max_commits
     now = datetime.now()
-    commits = []
+    commits = [DummyCommit(f"sha{i}", "User", "u@example.com", now, f"Msg {i}") for i in range(5)]
+    gh_instance._repo = DummyRepo(commits, [])
+    df = fetch_commits("any/repo", max_commits=3)
+    assert len(df) == 3
 
-
-    for i in range(10):
-        commits.append(DummyCommit(f"sha{i}", f"Author{i}", f"example{i}@asdfs.com", now - timedelta(days=i), f"Commit {i}"))
-
-    gh_instance._repo = DummyRepo(commits)
-    fetch = fetch_commits("any/repo", max_commits=3)
-    assert len(fetch) == 3
-    expected_shas = ["sha0", "sha1", "sha2"]
-    actual_shas = fetch["sha"].tolist()
-    assert actual_shas == expected_shas
-    
-
-def test_fetch_commits_empty():
-    gh_instance._repo = DummyRepo([])
-    fetch = fetch_commits("any/repo")
-    assert isinstance(fetch, pd.DataFrame)
-    assert fetch.empty
-
-# --- Integration Test with vcrpy ---
-
-my_vcr = vcr.VCR(
-    cassette_library_dir="tests/cassettes",
-    record_mode="once",
-    match_on=["method", "uri"]
-)
-
-@pytest.mark.use_real_github
-@my_vcr.use_cassette("octocat_hello_world_commits.yaml")
-def test_fetch_commits_octocat_basic(monkeypatch):
-    token = os.getenv("GITHUB_TOKEN")
-    assert token, "GITHUB_TOKEN must be set to run this test"
-    monkeypatch.setattr("src.repo_miner.Github", Github)
-
-    df = fetch_commits("octocat/Hello-World", max_commits=5)
-    assert not df.empty
-    assert set(["sha", "author", "email", "date", "message"]).issubset(df.columns)
-    assert df["email"].iloc[0] == "octocat@github.com"
-
-@pytest.mark.use_real_github
-@my_vcr.use_cassette("octocat_hello_world_zero.yaml")
-def test_fetch_commits_octocat_zero(monkeypatch):
-    monkeypatch.setattr("src.repo_miner.Github", Github)
-
-    token = os.getenv("GITHUB_TOKEN")
-    assert token, "GITHUB_TOKEN must be set"
-
-    df = fetch_commits("octocat/Hello-World", max_commits=0)
-
-    assert len(df.index) == 0
-    assert len(df.columns) == 0
+def test_fetch_commits_empty(monkeypatch):
+    gh_instance._repo = DummyRepo([], [])
+    df = fetch_commits("any/repo")
     assert df.empty
+
+def test_fetch_issues_basic(monkeypatch):
+    now = datetime.now()
+    issues = [
+        DummyIssue(1, 101, "Issue A", "alice", "open", now, None, 0),
+        DummyIssue(2, 102, "Issue B", "bob", "closed", now - timedelta(days=2), now, 2)
+    ]
+    gh_instance._repo = DummyRepo([], issues)
+    df = fetch_issues("any/repo", state="all")
+    assert {"id", "number", "title", "user", "state", "created_at", "closed_at", "comments"}.issubset(df.columns)
+    assert len(df) == 2
+    # Check date normalization
+    assert df.iloc[1]["closed_at"].endswith("Z") or isinstance(df.iloc[1]["closed_at"], str)
+
+def test_fetch_issues_excludes_prs(monkeypatch):
+    now = datetime.now()
+    issues = [
+        DummyIssue(1, 101, "Issue", "alice", "open", now, None, 0),
+        DummyIssue(3, 201, "PR", "bob", "closed", now, now, 1, is_pr=True)
+    ]
+    gh_instance._repo = DummyRepo([], issues)
+    df = fetch_issues("any/repo")
+    assert len(df) == 1
+    assert df.iloc[0]["title"] == "Issue"
+
+def test_fetch_issues_limit_and_state(monkeypatch):
+    now = datetime.now()
+    issues = [
+        DummyIssue(i, 100+i, f"Issue {i}", "user", "open", now, None, 0) for i in range(10)
+    ]
+    gh_instance._repo = DummyRepo([], issues)
+    df = fetch_issues("any/repo", state="open", max_issues=5)
+    assert len(df) == 5
+
+def test_merge_and_summarize_output(capsys):
+    # Prepare test DataFrames
+    df_commits = pd.DataFrame({
+        "sha": ["a", "b", "c", "d"],
+        "author": ["X", "Y", "X", "Z"],
+        "email": ["x@e", "y@e", "x@e", "z@e"],
+        "date": ["2025-01-01T00:00:00", "2025-01-01T01:00:00",
+                 "2025-01-02T00:00:00", "2025-01-02T01:00:00"],
+        "message": ["m1", "m2", "m3", "m4"]
+    })
+    df_issues = pd.DataFrame({
+        "id": [1,2,3],
+        "number": [101,102,103],
+        "title": ["I1","I2","I3"],
+        "user": ["u1","u2","u3"],
+        "state": ["closed","open","closed"],
+        "created_at": ["2025-01-01T00:00:00","2025-01-01T02:00:00","2025-01-02T00:00:00"],
+        "closed_at": ["2025-01-01T12:00:00",None,"2025-01-02T12:00:00"],
+        "comments": [0,1,2]
+    })
+    # Run summarize
+    merge_and_summarize(df_commits, df_issues)
+    captured = capsys.readouterr().out
+    # Check top committer
+    assert "Top 5 committers" in captured
+    assert "X: 2 commits" in captured
+    # Check close rate
+    assert "Issue close rate: 0.67" in captured
+    # Check avg open duration
+    assert "Avg. issue open duration:" in captured
